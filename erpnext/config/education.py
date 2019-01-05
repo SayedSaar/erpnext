@@ -150,11 +150,11 @@ def get_data():
 				},
 				{
 					"type": "doctype",
-					"name": "Fee Schedule"
+					"name": "Student Fee Schedule"
 				},
 				{
 					"type": "doctype",
-					"name": "Fee Structure"
+					"name": "Student Fee Structure"
 				},
 				{
 					"type": "doctype",
