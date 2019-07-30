@@ -373,3 +373,30 @@ def get_current_enrollment(student, academic_year=None):
 		return program_enrollment_list[0]
 	else:
 		return None
+
+@frappe.whitelist()
+def get_student_group(student):
+	import sys
+	reload(sys)
+	sys.setdefaultencoding('utf-8')
+
+	current_academic_year = frappe.defaults.get_defaults().academic_year
+	group_list = frappe.db.sql('''
+		select
+			`tabStudent Group`.student_group_name
+		from 
+			`tabStudent Group Student`
+		left join
+			`tabStudent Group` on `tabStudent Group`.`name` = `tabStudent Group Student`.`parent`
+		where 
+			`tabStudent Group Student`.student = %s and `tabStudent Group`.academic_year = %s
+		''', (student, current_academic_year), as_dict=1)
+
+	group_list_name = []
+	for group in group_list:
+		group_list_name.append(group.student_group_name)
+	
+	if group_list_name:
+		return ", ".join(map(str, group_list_name))
+	else:
+		return None

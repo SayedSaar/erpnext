@@ -13,7 +13,6 @@ from frappe.contacts.doctype.address.address import (get_address_display,
 	get_default_address, get_company_address)
 from frappe.contacts.doctype.contact.contact import get_contact_details, get_default_contact
 from six import iteritems
-from collections import OrderedDict
 
 def execute(filters=None):
 	if not filters:
@@ -39,8 +38,11 @@ def execute(filters=None):
 	filters = set_account_currency(filters)
 
 	columns = get_columns(filters)
-
+	
 	res = get_result(filters, account_details)
+	from pprint import pprint
+	pprint(res)
+	
 
 	address = ""
 	mobile = ""
@@ -127,7 +129,6 @@ def get_result(filters, account_details):
 	gl_entries = get_gl_entries(filters)
 
 	data = get_data_with_opening_closing(filters, account_details, gl_entries)
-
 	result = get_result_as_list(data, filters)
 
 	return result
@@ -145,14 +146,9 @@ def get_gl_entries(filters):
 
 	if filters.get("group_by") == _("Group by Voucher (Consolidated)"):
 		group_by_statement = "group by voucher_type, voucher_no, account, cost_center"
-
 		select_fields = """, sum(debit) as debit, sum(credit) as credit,
 			sum(debit_in_account_currency) as debit_in_account_currency,
 			sum(credit_in_account_currency) as  credit_in_account_currency"""
-
-	if filters.get("include_default_book_entries"):
-		filters['company_fb'] = frappe.db.get_value("Company",
-			filters.get("company"), 'default_finance_book')
 
 	gl_entries = frappe.db.sql(
 		"""
@@ -171,10 +167,78 @@ def get_gl_entries(filters):
 		),
 		filters, as_dict=1)
 
+	draft_payments = []
+
+	if filters.get("group_by") == _("Group by Voucher (Consolidated)"):
+		draft_payments = frappe.db.sql(
+			"""
+			select
+				posting_date, case when payment_type = 'Receive' THEN paid_to ELSE paid_from END as `account`, party_type, party,
+				'DRAFT' as voucher_type, `name` as voucher_no, NULL as cost_center, NULL as project,
+				NULL as against_voucher_type, NULL as against_voucher, 
+				case when payment_type = 'Receive' THEN paid_to_account_currency ELSE paid_from_account_currency END as `account_currency`,
+				remarks, party as `against`, 'No' as is_opening,
+				case when payment_type = 'Receive' THEN paid_amount ELSE 0 END as `debit`,
+				case when payment_type = 'Receive' THEN 0 ELSE paid_amount END as `credit`,
+				case when payment_type = 'Receive' THEN paid_amount ELSE 0 END as `debit_in_account_currency`,
+				case when payment_type = 'Receive' THEN 0 ELSE paid_amount END as `credit_in_account_currency`
+			from `tabPayment Entry`
+			where docstatus = 0 and company=%(company)s {conditions} {order_by_statement}
+			""".format(
+				select_fields=select_fields, conditions=get_payment_conditions(filters),
+				order_by_statement=order_by_statement
+			),
+			filters, as_dict=1)
+
+	def sort_gl_entries(el):
+		return el.posting_date
+
+	gl_entries.extend(draft_payments)
+	gl_entries.sort(key=sort_gl_entries)
+
 	if filters.get('presentation_currency'):
 		return convert_to_presentation_currency(gl_entries, currency_map)
 	else:
 		return gl_entries
+
+def get_payment_conditions(filters):
+	conditions = []
+	if filters.get("account"):
+		lft, rgt = frappe.db.get_value("Account", filters["account"], ["lft", "rgt"])
+		conditions.append("""account in (select name from tabAccount
+			where lft>=%s and rgt<=%s and docstatus<2)""" % (lft, rgt))
+
+	if filters.get("cost_center"):
+		filters.cost_center = get_cost_centers_with_children(filters.cost_center)
+		conditions.append("cost_center in %(cost_center)s")
+
+	if filters.get("voucher_no"):
+		conditions.append("voucher_no=%(voucher_no)s")
+
+	if filters.get("group_by") == "Group by Party" and not filters.get("party_type"):
+		conditions.append("party_type in ('Customer', 'Supplier')")
+
+	if filters.get("party_type"):
+		conditions.append("party_type=%(party_type)s")
+
+	if filters.get("party"):
+		conditions.append("party in %(party)s")
+
+	if not (filters.get("account") or filters.get("party") or
+		filters.get("group_by") in ["Group by Account", "Group by Party"]):
+		conditions.append("posting_date >=%(from_date)s")
+		conditions.append("posting_date <=%(to_date)s")
+
+	if filters.get("project"):
+		conditions.append("project in %(project)s")
+
+	from frappe.desk.reportview import build_match_conditions
+	match_conditions = build_match_conditions("GL Entry")
+
+	if match_conditions:
+		conditions.append(match_conditions)
+
+	return "and {}".format(" and ".join(conditions)) if conditions else ""
 
 
 def get_conditions(filters):
@@ -208,11 +272,12 @@ def get_conditions(filters):
 	if filters.get("project"):
 		conditions.append("project in %(project)s")
 
-	if filters.get("finance_book"):
-		if filters.get("include_default_book_entries"):
-			conditions.append("finance_book in (%(finance_book)s, %(company_fb)s)")
-		else:
-			conditions.append("finance_book in (%(finance_book)s)")
+	company_finance_book = erpnext.get_default_finance_book(filters.get("company"))
+	if not filters.get("finance_book") or (filters.get("finance_book") == company_finance_book):
+		filters['finance_book'] = company_finance_book
+		conditions.append("ifnull(finance_book, '') in (%(finance_book)s, '')")
+	elif filters.get("finance_book"):
+		conditions.append("ifnull(finance_book, '') = %(finance_book)s")
 
 	from frappe.desk.reportview import build_match_conditions
 	match_conditions = build_match_conditions("GL Entry")
@@ -286,7 +351,7 @@ def group_by_field(group_by):
 		return 'voucher_no'
 
 def initialize_gle_map(gl_entries, filters):
-	gle_map = OrderedDict()
+	gle_map = frappe._dict()
 	group_by = group_by_field(filters.get('group_by'))
 
 	for gle in gl_entries:
@@ -308,8 +373,7 @@ def get_accountwise_gle(filters, gl_entries, gle_map):
 
 	from_date, to_date = getdate(filters.from_date), getdate(filters.to_date)
 	for gle in gl_entries:
-		if (gle.posting_date < from_date or
-			(cstr(gle.is_opening) == "Yes" and not filters.get("show_opening_entries"))):
+		if gle.posting_date < from_date or cstr(gle.is_opening) == "Yes":
 			update_value_in_dict(gle_map[gle.get(group_by)].totals, 'opening', gle)
 			update_value_in_dict(totals, 'opening', gle)
 
