@@ -55,7 +55,8 @@ frappe.ui.form.CustomerQuickEntryForm = frappe.ui.form.QuickEntryForm.extend({
 		{
 			label: __("City"),
 			fieldname: "city",
-			fieldtype: "Data"
+			fieldtype: "Link",
+			options: "City"
 		},
 		{
 			label: __("State"),
